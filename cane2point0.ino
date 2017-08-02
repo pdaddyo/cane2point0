@@ -18,7 +18,7 @@ CRGB leds[NUM_LEDS];
 #define FRAMES_PER_SECOND  120
 
 void setup() {
-  delay(3000); // 3 second delay for recovery
+  delay(1500); // startup pause
 
   // bluetooth
   Serial2.begin(9600);
@@ -28,7 +28,7 @@ void setup() {
   // motion sensor
   imu.begin();
   filter.begin(100);
-  
+
   // enable prop shield LED support
   pinMode(7, OUTPUT);
   digitalWrite(7, HIGH);
@@ -52,11 +52,11 @@ String blueToothIncomingString;
 
 void loop()
 {
-   float ax, ay, az;
+  float ax, ay, az;
   float gx, gy, gz;
   float mx, my, mz;
   float roll, pitch, heading;
-  
+
   // Call the current pattern function once, updating the 'leds' array
   gPatterns[gCurrentPatternNumber]();
 
@@ -81,6 +81,7 @@ void loop()
     Serial.print(heading);
     Serial.print(" ");
     Serial.print(pitch);
+    gHue = abs((int)pitch * 2);
     Serial.print(" ");
     Serial.println(roll);
   }
@@ -91,13 +92,13 @@ void loop()
     blueToothIncomingString = Serial2.readString();
     // send a byte to the software serial port
     Serial.println(blueToothIncomingString);
-    nextPattern(); 
+    nextPattern();
   }
 
 
   // do some periodic updates
   EVERY_N_MILLISECONDS( 20 ) {
-    gHue++;  // slowly cycle the "base color" through the rainbow
+    //gHue++;  // slowly cycle the "base color" through the rainbow
   }
   EVERY_N_SECONDS( 10 ) {
     nextPattern();  // change patterns periodically
