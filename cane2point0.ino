@@ -3,6 +3,7 @@ FASTLED_USING_NAMESPACE
 #include <NXPMotionSense.h>
 #include <Wire.h>
 #include <EEPROM.h>
+#include "SerialFlash.h"
 
 NXPMotionSense imu;
 NXPSensorFusion filter;
@@ -14,16 +15,21 @@ NXPSensorFusion filter;
 #define NUM_LEDS    72
 CRGB leds[NUM_LEDS];
 
-#define BRIGHTNESS          40
-#define FRAMES_PER_SECOND  120
+#define BRIGHTNESS          3
+#define FRAMES_PER_SECOND  400
 
 void setup() {
-  delay(1500); // startup pause
+  // usb debug
+  Serial.begin(115200);
+  delay(500); // startup pause
+
+  SerialFlash.begin(6); // enable memory module
+  //attempt to load bmp from prop shield flash
+  loadBmp("boomtown.bmp");
 
   // bluetooth
   Serial2.begin(9600);
-  // usb debug
-  Serial.begin(57600);
+
   Serial.println("setup()");
   // motion sensor
   imu.begin();
@@ -40,7 +46,6 @@ void setup() {
   FastLED.setBrightness(BRIGHTNESS);
 }
 
-
 // List of patterns to cycle through.  Each is defined as a separate function below.
 typedef void (*SimplePatternList[])();
 SimplePatternList gPatterns = { rainbow, rainbowWithGlitter, confetti, sinelon, juggle, bpm };
@@ -49,6 +54,7 @@ uint8_t gCurrentPatternNumber = 0; // Index number of which pattern is current
 uint8_t gHue = 0; // rotating "base color" used by many of the patterns
 
 String blueToothIncomingString;
+int currentSlice = 0;
 
 void loop()
 {
@@ -58,8 +64,10 @@ void loop()
   float roll, pitch, heading;
 
   // Call the current pattern function once, updating the 'leds' array
-  gPatterns[gCurrentPatternNumber]();
+  //  gPatterns[gCurrentPatternNumber]();
 
+  showPovSlice(currentSlice++);
+  
   // send the 'leds' array out to the actual LED strip
   FastLED.show();
   // insert a delay to keep the framerate modest
@@ -77,15 +85,18 @@ void loop()
     roll = filter.getRoll();
     pitch = filter.getPitch();
     heading = filter.getYaw();
+    gHue = abs((int)pitch * 2);
+  }
+
+
+  EVERY_N_SECONDS( 3 ) {
     Serial.print("Orientation: ");
     Serial.print(heading);
     Serial.print(" ");
     Serial.print(pitch);
-    gHue = abs((int)pitch * 2);
     Serial.print(" ");
     Serial.println(roll);
   }
-
 
   if (Serial2.available()) {
     Serial.println("serial2 data!");
@@ -105,6 +116,108 @@ void loop()
   }
 }
 
+
+char * bmpData = 0;
+int bmpHeaderSize = 0;
+int bmpWidth = 0;
+int bmpHeight = 0;
+int bmpPixelDataOffset = 0;
+uint16_t row_bits, row_bytes;
+
+long readLong(int offset) {
+  long  l = bmpData[offset] | (bmpData[offset + 1] << 8) | (bmpData[offset + 2] << 16) | (bmpData[offset + 3] << 24);
+  return l;
+}
+
+
+short readShort(int offset) {
+  short  s = bmpData[offset] | (bmpData[offset + 1] << 8) ;
+  return s;
+}
+
+void loadBmp(const char *filename) {
+  SerialFlashFile file;
+  Serial.println("Waiting for serialFlash");
+
+  while (SerialFlash.ready() == false) {
+    delay(10);
+  }
+
+  Serial.println("serialFlash ready..");
+
+
+  file = SerialFlash.open(filename);
+  if (file) {
+    Serial.print("opened file ");
+    Serial.print(filename);
+    Serial.print(" file size: ");
+    //  uint32_t address = file.getFlashAddress();
+    uint32_t fileSize = file.size();
+    Serial.println(fileSize);
+
+    // 24 bit bmps only please!
+
+    bmpData = (char*) malloc(fileSize);
+    file.read(bmpData, fileSize);
+    Serial.println("loaded file into memory.");
+    bmpHeaderSize = readLong(0x0e);
+    // check header for width and height
+    bmpWidth = readShort(0x0e + 4);
+    bmpHeight = readShort(0x0e + 8);
+    bmpPixelDataOffset = readLong(0x0a);
+    row_bits = (bmpWidth * 24 + 7) & ~7;
+    // Calculate width in bytes (4-byte boundary aligned)
+    row_bytes = (row_bits / 8 + 3) & ~3;
+
+    Serial.print("bmpHeaderSize ");
+    Serial.println(bmpHeaderSize);
+    Serial.print("dimensions: ");
+    Serial.print(bmpWidth);
+    Serial.print("x");
+    Serial.println(bmpHeight);
+    Serial.print("pixel data offset is ");
+    Serial.println(bmpPixelDataOffset);
+    Serial.print("row_bytes ");
+    Serial.println(row_bytes);
+    Serial.print("first pixel: ");
+    Serial.println(readLong(bmpPixelDataOffset), HEX);
+
+  } else {
+    Serial.println("failed to open file ");
+
+  }
+}
+
+
+void showPovSlice(int slice) {
+  for (int led = 0; led < NUM_LEDS; led++) {
+    leds[led] = getPix(led, slice);
+  }
+}
+
+
+CRGB getPix(int X, int Y) {
+  uint16_t row = X % bmpHeight;
+  uint16_t col = Y % bmpWidth;
+  CRGB px;
+  int offset = ((bmpPixelDataOffset + (row * row_bytes)) + (Y * 3));
+  px.blue = bmpData[offset];
+  px.green = bmpData[offset + 1];
+  px.red = bmpData[offset + 2];
+  return px;
+}
+
+
+
+
+
+
+
+
+
+
+
+/// demo LED functions
 #define ARRAY_SIZE(A) (sizeof(A) / sizeof((A)[0]))
 
 void nextPattern()
