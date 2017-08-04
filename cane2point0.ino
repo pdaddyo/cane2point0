@@ -160,11 +160,14 @@ void beat() {
 void pov() {
   unsigned long timeSinceLastBeat = (micros() - lastBeatTime) % lastBeatDuration;
   float halfBeat = lastBeatDuration / 2;
-   float ratioComplete = timeSinceLastBeat / halfBeat;
+
   if (timeSinceLastBeat < halfBeat) {
     // first half: swipe up (backwards)
+    float ratioComplete = timeSinceLastBeat / halfBeat;
     showPovSlice(bmpWidth - (ratioComplete * bmpWidth));
   } else {
+    
+    float ratioComplete = (timeSinceLastBeat / halfBeat) - 1.0;
     showPovSlice((ratioComplete * bmpWidth));
   }
 }
