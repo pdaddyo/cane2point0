@@ -15,22 +15,25 @@ NXPSensorFusion filter;
 #define NUM_LEDS    72
 CRGB leds[NUM_LEDS];
 
-#define BRIGHTNESS          3
-#define FRAMES_PER_SECOND  400
+#define BRIGHTNESS          12
+#define FRAMES_PER_SECOND  1000
 
 void setup() {
   // usb debug
   Serial.begin(115200);
-  delay(500); // startup pause
 
-  SerialFlash.begin(6); // enable memory module
-  //attempt to load bmp from prop shield flash
-  loadBmp("boomtown.bmp");
+  delay(500); // startup pause
+  Serial.println("setup()");
 
   // bluetooth
   Serial2.begin(9600);
 
-  Serial.println("setup()");
+  // enable memory module
+  SerialFlash.begin(6);
+  //attempt to load bmp from prop shield flash
+  loadBmp("boomtown.bmp");
+
+
   // motion sensor
   imu.begin();
   filter.begin(100);
@@ -48,7 +51,7 @@ void setup() {
 
 // List of patterns to cycle through.  Each is defined as a separate function below.
 typedef void (*SimplePatternList[])();
-SimplePatternList gPatterns = { rainbow, rainbowWithGlitter, confetti, sinelon, juggle, bpm };
+SimplePatternList gPatterns = { pov, bpmPulsing, rainbow, rainbowWithGlitter, confetti, sinelon, juggle };
 
 uint8_t gCurrentPatternNumber = 0; // Index number of which pattern is current
 uint8_t gHue = 0; // rotating "base color" used by many of the patterns
@@ -56,18 +59,27 @@ uint8_t gHue = 0; // rotating "base color" used by many of the patterns
 String blueToothIncomingString;
 int currentSlice = 0;
 
+float ax, ay, az;
+float gx, gy, gz;
+float mx, my, mz;
+float roll, pitch, heading;
+float lastPitch = 0;
+float pitchChange = 0;
+float lastPitchChange = 0;
+
+// bmp vars
+char * bmpData = 0;
+int bmpHeaderSize = 0;
+int bmpWidth = 0;
+int bmpHeight = 0;
+int bmpPixelDataOffset = 0;
+
 void loop()
 {
-  float ax, ay, az;
-  float gx, gy, gz;
-  float mx, my, mz;
-  float roll, pitch, heading;
 
   // Call the current pattern function once, updating the 'leds' array
-  //  gPatterns[gCurrentPatternNumber]();
+  gPatterns[gCurrentPatternNumber]();
 
-  showPovSlice(currentSlice++);
-  
   // send the 'leds' array out to the actual LED strip
   FastLED.show();
   // insert a delay to keep the framerate modest
@@ -84,8 +96,22 @@ void loop()
     // print the heading, pitch and roll
     roll = filter.getRoll();
     pitch = filter.getPitch();
+    pitchChange = pitch - lastPitch;
+    if (lastPitchChange < 0 && pitchChange > 0  && abs(pitchChange) > 0.04) {
+      beat();
+    }
+
+    if (lastPitchChange > 0 && pitchChange < 0 && abs(pitchChange) > 0.04) {
+      // Serial.println("BEAT");
+      // Serial.println(pitchChange);
+
+    }
+    lastPitchChange = pitchChange;
+
+
+    lastPitch = pitch;
     heading = filter.getYaw();
-    gHue = abs((int)pitch * 2);
+    gHue = abs((int)pitch * 8);
   }
 
 
@@ -98,30 +124,57 @@ void loop()
     Serial.println(roll);
   }
 
-  if (Serial2.available()) {
-    Serial.println("serial2 data!");
-    blueToothIncomingString = Serial2.readString();
-    // send a byte to the software serial port
-    Serial.println(blueToothIncomingString);
-    nextPattern();
-  }
+
 
 
   // do some periodic updates
   EVERY_N_MILLISECONDS( 20 ) {
+    if (Serial2.available()) {
+      Serial.println("serial2 data!");
+      blueToothIncomingString = Serial2.readString();
+      // send a byte to the software serial port
+      Serial.println(blueToothIncomingString);
+      nextPattern();
+    }
+
     //gHue++;  // slowly cycle the "base color" through the rainbow
   }
+
   EVERY_N_SECONDS( 10 ) {
-    nextPattern();  // change patterns periodically
+    // nextPattern();  // change patterns periodically
   }
 }
 
+unsigned long lastBeatTime = 0;
+unsigned long lastBeatDuration = 500000;
 
-char * bmpData = 0;
-int bmpHeaderSize = 0;
-int bmpWidth = 0;
-int bmpHeight = 0;
-int bmpPixelDataOffset = 0;
+void beat() {
+  unsigned long currentTime = micros();
+  lastBeatDuration = currentTime - lastBeatTime;
+  lastBeatTime = currentTime;
+  Serial.print("BEAT! duration: ");
+  Serial.println(lastBeatDuration);
+}
+
+
+void pov() {
+  unsigned long timeSinceLastBeat = (micros() - lastBeatTime) % lastBeatDuration;
+  float halfBeat = lastBeatDuration / 2;
+   float ratioComplete = timeSinceLastBeat / halfBeat;
+  if (timeSinceLastBeat < halfBeat) {
+    // first half: swipe up (backwards)
+    showPovSlice(bmpWidth - (ratioComplete * bmpWidth));
+  } else {
+    showPovSlice((ratioComplete * bmpWidth));
+  }
+}
+
+void showPovSlice(int slice) {
+  for (int led = 0; led < NUM_LEDS; led++) {
+    leds[led] = getPix(led, slice);
+  }
+}
+
 uint16_t row_bits, row_bytes;
 
 long readLong(int offset) {
@@ -189,18 +242,12 @@ void loadBmp(const char *filename) {
 }
 
 
-void showPovSlice(int slice) {
-  for (int led = 0; led < NUM_LEDS; led++) {
-    leds[led] = getPix(led, slice);
-  }
-}
-
 
 CRGB getPix(int X, int Y) {
   uint16_t row = X % bmpHeight;
   uint16_t col = Y % bmpWidth;
   CRGB px;
-  int offset = ((bmpPixelDataOffset + (row * row_bytes)) + (Y * 3));
+  int offset = ((bmpPixelDataOffset + (row * row_bytes)) + (col * 3));
   px.blue = bmpData[offset];
   px.green = bmpData[offset + 1];
   px.red = bmpData[offset + 2];
@@ -262,10 +309,10 @@ void sinelon()
   leds[pos] += CHSV( gHue, 255, 192);
 }
 
-void bpm()
+void bpmPulsing()
 {
   // colored stripes pulsing at a defined Beats-Per-Minute (BPM)
-  uint8_t BeatsPerMinute = 62;
+  uint8_t BeatsPerMinute = (int)120;
   CRGBPalette16 palette = PartyColors_p;
   uint8_t beat = beatsin8( BeatsPerMinute, 64, 255);
   for ( int i = 0; i < NUM_LEDS; i++) { //9948
