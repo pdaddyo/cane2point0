@@ -15,7 +15,7 @@ NXPSensorFusion filter;
 #define NUM_LEDS    72
 CRGB leds[NUM_LEDS];
 
-#define BRIGHTNESS          12
+#define BRIGHTNESS          15
 #define FRAMES_PER_SECOND  1000
 
 void setup() {
@@ -31,8 +31,7 @@ void setup() {
   // enable memory module
   SerialFlash.begin(6);
   //attempt to load bmp from prop shield flash
-  loadBmp("boomtown.bmp");
-
+  loadBmp("blythe.bmp");
 
   // motion sensor
   imu.begin();
@@ -74,6 +73,11 @@ int bmpWidth = 0;
 int bmpHeight = 0;
 int bmpPixelDataOffset = 0;
 
+float lastAngle = 0;
+float lastAngleChange = 0;
+unsigned long lastAngleTime = 0;
+unsigned long lastAngleDuration = 50;
+
 void loop()
 {
 
@@ -93,27 +97,33 @@ void loop()
     // Update the SensorFusion filter
     filter.update(gx, gy, gz, ax, ay, az, mx, my, mz);
 
+
+    unsigned long currentTime = micros();
+    lastAngleDuration = currentTime - lastAngleTime;
+    lastAngleTime = currentTime;
+    lastAngleChange = mz - lastAngle;
+    lastAngle = mz;
+
     // print the heading, pitch and roll
     roll = filter.getRoll();
     pitch = filter.getPitch();
+    heading = filter.getYaw();
     pitchChange = pitch - lastPitch;
-    if (lastPitchChange < 0 && pitchChange > 0  && abs(pitchChange) > 0.04) {
-      beat();
+    if (lastPitchChange < 0 && pitchChange > 0  && abs(pitchChange) > 0.08) {
+      //  beat();
+      //  Serial.print("up pitch = ");
+      //  Serial.println(pitch);
     }
 
-    if (lastPitchChange > 0 && pitchChange < 0 && abs(pitchChange) > 0.04) {
+    if (lastPitchChange > 0 && pitchChange < 0 && abs(pitchChange) > 0.08) {
       // Serial.println("BEAT");
       // Serial.println(pitchChange);
-
     }
     lastPitchChange = pitchChange;
-
-
     lastPitch = pitch;
-    heading = filter.getYaw();
+
     gHue = abs((int)pitch * 8);
   }
-
 
   EVERY_N_SECONDS( 3 ) {
     Serial.print("Orientation: ");
@@ -124,9 +134,6 @@ void loop()
     Serial.println(roll);
   }
 
-
-
-
   // do some periodic updates
   EVERY_N_MILLISECONDS( 20 ) {
     if (Serial2.available()) {
@@ -134,6 +141,7 @@ void loop()
       blueToothIncomingString = Serial2.readString();
       // send a byte to the software serial port
       Serial.println(blueToothIncomingString);
+      // if we hear anything nudge to next pattern - todo: proper control
       nextPattern();
     }
 
@@ -156,8 +164,47 @@ void beat() {
   Serial.println(lastBeatDuration);
 }
 
+/* mz - from 15 to -25 */
+float povFromAngle = 40;
+float povToAngle = 0;
 
 void pov() {
+  float angle = mz + 25;
+  
+  if (angle > povFromAngle || angle < povToAngle) {
+    // nothing to see here - clear pixels
+    black();
+  } else {
+    float totalSweep = povFromAngle - povToAngle;
+    float timeSinceLastAngle = micros() - lastAngleTime;
+    float ratioToNextAngleReading = timeSinceLastAngle / lastAngleDuration;
+    float interpolatedAngle = angle + (ratioToNextAngleReading * lastAngleChange);
+/*
+    Serial.print("angle, inter, ratio = ");
+    Serial.print(angle);
+    Serial.print(", ");
+    Serial.print(interpolatedAngle);
+    Serial.print(", ");
+    Serial.println(ratioToNextAngleReading);
+*/
+    int sliceNumber = (totalSweep - interpolatedAngle) / totalSweep * bmpWidth;
+    if (sliceNumber < 0 || sliceNumber >= bmpWidth) {
+      // we're past the image, stop
+      black();
+      return;
+    }
+    // draw!
+    showPovSlice( sliceNumber  );
+  }
+}
+
+void black() {
+  for (int led = 0; led < NUM_LEDS; led++) {
+    leds[led] = CRGB::Black;
+  }
+}
+
+void povBeatDeprecated() {
   unsigned long timeSinceLastBeat = (micros() - lastBeatTime) % lastBeatDuration;
   float halfBeat = lastBeatDuration / 2;
 
@@ -165,9 +212,15 @@ void pov() {
     // first half: swipe up (backwards)
     float ratioComplete = timeSinceLastBeat / halfBeat;
     showPovSlice(bmpWidth - (ratioComplete * bmpWidth));
+    /*for (int led = 0; led < NUM_LEDS; led++) {
+      leds[led] = CRGB::Green;
+      }*/
   } else {
-    
+
     float ratioComplete = (timeSinceLastBeat / halfBeat) - 1.0;
+    /*for (int led = 0; led < NUM_LEDS; led++) {
+      leds[led] = CRGB::Red;
+      }*/
     showPovSlice((ratioComplete * bmpWidth));
   }
 }
