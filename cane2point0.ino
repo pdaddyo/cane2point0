@@ -50,7 +50,7 @@ void setup() {
 
 // List of patterns to cycle through.  Each is defined as a separate function below.
 typedef void (*SimplePatternList[])();
-SimplePatternList gPatterns = { pov, bpmPulsing, rainbow, rainbowWithGlitter, confetti, sinelon, juggle };
+SimplePatternList gPatterns = { pov, beatFlash, angleRainbow, bpmPulsing, rainbow, rainbowWithGlitter, confetti, sinelon, juggle };
 
 uint8_t gCurrentPatternNumber = 0; // Index number of which pattern is current
 uint8_t gHue = 0; // rotating "base color" used by many of the patterns
@@ -73,6 +73,7 @@ int bmpWidth = 0;
 int bmpHeight = 0;
 int bmpPixelDataOffset = 0;
 
+// interpolating the raw angle data
 float lastAngle = 0;
 float lastAngleChange = 0;
 unsigned long lastAngleTime = 0;
@@ -87,16 +88,16 @@ void loop()
   // send the 'leds' array out to the actual LED strip
   FastLED.show();
   // insert a delay to keep the framerate modest
-  FastLED.delay(1000 / FRAMES_PER_SECOND);
+
+  // forget it we have enough to do each frame lol
+  // FastLED.delay(1000 / FRAMES_PER_SECOND);
 
 
   if (imu.available()) {
     // Read the motion sensors
     imu.readMotionSensor(ax, ay, az, gx, gy, gz, mx, my, mz);
-
     // Update the SensorFusion filter
     filter.update(gx, gy, gz, ax, ay, az, mx, my, mz);
-
 
     unsigned long currentTime = micros();
     lastAngleDuration = currentTime - lastAngleTime;
@@ -110,19 +111,20 @@ void loop()
     heading = filter.getYaw();
     pitchChange = pitch - lastPitch;
     if (lastPitchChange < 0 && pitchChange > 0  && abs(pitchChange) > 0.08) {
-      //  beat();
+       
       //  Serial.print("up pitch = ");
       //  Serial.println(pitch);
     }
 
     if (lastPitchChange > 0 && pitchChange < 0 && abs(pitchChange) > 0.08) {
+      beat();
       // Serial.println("BEAT");
       // Serial.println(pitchChange);
     }
     lastPitchChange = pitchChange;
     lastPitch = pitch;
 
-    gHue = abs((int)pitch * 8);
+   // gHue = abs((int)pitch * 8);
   }
 
   EVERY_N_SECONDS( 3 ) {
@@ -145,7 +147,7 @@ void loop()
       nextPattern();
     }
 
-    //gHue++;  // slowly cycle the "base color" through the rainbow
+    gHue++;  // slowly cycle the "base color" through the rainbow
   }
 
   EVERY_N_SECONDS( 10 ) {
@@ -164,13 +166,28 @@ void beat() {
   Serial.println(lastBeatDuration);
 }
 
+
+// flash to the beat with the current hue
+void beatFlash() {
+  if ( micros() - lastBeatTime < 50000) {
+    fill(CHSV( gHue, 255, 255));
+  } else {
+    black();
+  }
+}
+
+// draw solid colour with hue based on mz (essentially raw pitch)
+void angleRainbow() {
+  fill(CHSV( abs(mz * 4), 255, 255));
+}
+
 /* mz - from 15 to -25 */
 float povFromAngle = 40;
 float povToAngle = 0;
 
 void pov() {
   float angle = mz + 25;
-  
+
   if (angle > povFromAngle || angle < povToAngle) {
     // nothing to see here - clear pixels
     black();
@@ -179,14 +196,14 @@ void pov() {
     float timeSinceLastAngle = micros() - lastAngleTime;
     float ratioToNextAngleReading = timeSinceLastAngle / lastAngleDuration;
     float interpolatedAngle = angle + (ratioToNextAngleReading * lastAngleChange);
-/*
-    Serial.print("angle, inter, ratio = ");
-    Serial.print(angle);
-    Serial.print(", ");
-    Serial.print(interpolatedAngle);
-    Serial.print(", ");
-    Serial.println(ratioToNextAngleReading);
-*/
+    /*
+        Serial.print("angle, inter, ratio = ");
+        Serial.print(angle);
+        Serial.print(", ");
+        Serial.print(interpolatedAngle);
+        Serial.print(", ");
+        Serial.println(ratioToNextAngleReading);
+    */
     int sliceNumber = (totalSweep - interpolatedAngle) / totalSweep * bmpWidth;
     if (sliceNumber < 0 || sliceNumber >= bmpWidth) {
       // we're past the image, stop
@@ -199,8 +216,12 @@ void pov() {
 }
 
 void black() {
+  fill(CRGB::Black);
+}
+
+void fill(CRGB color) {
   for (int led = 0; led < NUM_LEDS; led++) {
-    leds[led] = CRGB::Black;
+    leds[led] = color;
   }
 }
 
@@ -225,11 +246,15 @@ void povBeatDeprecated() {
   }
 }
 
+// draw a vertical slice of the POV bitmap
 void showPovSlice(int slice) {
+  Serial.print("slice = ");
+  Serial.println(slice);
   for (int led = 0; led < NUM_LEDS; led++) {
     leds[led] = getPix(led, slice);
   }
 }
+
 
 uint16_t row_bits, row_bytes;
 
@@ -253,20 +278,20 @@ void loadBmp(const char *filename) {
   }
 
   Serial.println("serialFlash ready..");
-
-
   file = SerialFlash.open(filename);
   if (file) {
     Serial.print("opened file ");
     Serial.print(filename);
     Serial.print(" file size: ");
-    //  uint32_t address = file.getFlashAddress();
     uint32_t fileSize = file.size();
     Serial.println(fileSize);
 
     // 24 bit bmps only please!
 
     bmpData = (char*) malloc(fileSize);
+    if (!bmpData) {
+      Serial.println("failed to allocate memory for bmp file");
+    }
     file.read(bmpData, fileSize);
     Serial.println("loaded file into memory.");
     bmpHeaderSize = readLong(0x0e);
@@ -297,8 +322,6 @@ void loadBmp(const char *filename) {
   }
 }
 
-
-
 CRGB getPix(int X, int Y) {
   uint16_t row = X % bmpHeight;
   uint16_t col = Y % bmpWidth;
@@ -309,7 +332,6 @@ CRGB getPix(int X, int Y) {
   px.red = bmpData[offset + 2];
   return px;
 }
-
 
 
 
