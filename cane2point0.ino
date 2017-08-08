@@ -16,41 +16,9 @@ NXPSensorFusion filter;
 CRGB leds[NUM_LEDS];
 
 #define BRIGHTNESS          15
-#define FRAMES_PER_SECOND  1000
-
-void setup() {
-  // usb debug
-  Serial.begin(115200);
-
-  delay(500); // startup pause
-  Serial.println("setup()");
-
-  // bluetooth
-  Serial2.begin(9600);
-
-  // enable memory module
-  SerialFlash.begin(6);
-  //attempt to load bmp from prop shield flash
-  loadBmp("blythe.bmp");
-
-  // motion sensor
-  imu.begin();
-  filter.begin(100);
-
-  // enable prop shield LED support
-  pinMode(7, OUTPUT);
-  digitalWrite(7, HIGH);
-
-  // tell FastLED about the LED strip configuration
-  FastLED.addLeds<LED_TYPE, DATA_PIN, CLK_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection(TypicalLEDStrip);
-
-  // set master brightness control
-  FastLED.setBrightness(BRIGHTNESS);
-}
+#define FRAMES_PER_SECOND  500
 
 // List of patterns to cycle through.  Each is defined as a separate function below.
-typedef void (*SimplePatternList[])();
-SimplePatternList gPatterns = { pov, beatFlash, angleRainbow, bpmPulsing, rainbow, rainbowWithGlitter, confetti, sinelon, juggle };
 
 uint8_t gCurrentPatternNumber = 0; // Index number of which pattern is current
 uint8_t gHue = 0; // rotating "base color" used by many of the patterns
@@ -74,10 +42,45 @@ int bmpHeight = 0;
 int bmpPixelDataOffset = 0;
 
 // interpolating the raw angle data
+float angle = 0;
 float lastAngle = 0;
 float lastAngleChange = 0;
 unsigned long lastAngleTime = 0;
 unsigned long lastAngleDuration = 50;
+
+void setup() {
+  // usb debug
+  Serial.begin(9600);
+
+  delay(500); // startup pause
+  Serial.println("setup()");
+
+  // bluetooth
+  Serial2.begin(9600);
+
+  // enable memory module
+  SerialFlash.begin(6);
+  //attempt to load bmp from prop shield flash
+  loadBmp("boomtown.bmp");
+
+  // motion sensor
+  imu.begin();
+  filter.begin(100);
+
+  // enable prop shield LED support
+  pinMode(7, OUTPUT);
+  digitalWrite(7, HIGH);
+
+  // tell FastLED about the LED strip configuration
+  FastLED.addLeds<LED_TYPE, DATA_PIN, CLK_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection(TypicalLEDStrip);
+
+  // set master brightness control
+  FastLED.setBrightness(BRIGHTNESS);
+}
+
+
+typedef void (*SimplePatternList[])();
+SimplePatternList gPatterns = { pov3Rainbow, pov3, beatFlash, angleRainbow, bpmPulsing, rainbow, rainbowWithGlitter, confetti, sinelon, juggle };
 
 void loop()
 {
@@ -90,10 +93,12 @@ void loop()
   // insert a delay to keep the framerate modest
 
   // forget it we have enough to do each frame lol
-  // FastLED.delay(1000 / FRAMES_PER_SECOND);
+  FastLED.delay(1000 / FRAMES_PER_SECOND);
 
 
   if (imu.available()) {
+    lastAngle = mz;
+
     // Read the motion sensors
     imu.readMotionSensor(ax, ay, az, gx, gy, gz, mx, my, mz);
     // Update the SensorFusion filter
@@ -103,7 +108,7 @@ void loop()
     lastAngleDuration = currentTime - lastAngleTime;
     lastAngleTime = currentTime;
     lastAngleChange = mz - lastAngle;
-    lastAngle = mz;
+    angle = mz;
 
     // print the heading, pitch and roll
     roll = filter.getRoll();
@@ -111,7 +116,7 @@ void loop()
     heading = filter.getYaw();
     pitchChange = pitch - lastPitch;
     if (lastPitchChange < 0 && pitchChange > 0  && abs(pitchChange) > 0.08) {
-       
+
       //  Serial.print("up pitch = ");
       //  Serial.println(pitch);
     }
@@ -124,7 +129,7 @@ void loop()
     lastPitchChange = pitchChange;
     lastPitch = pitch;
 
-   // gHue = abs((int)pitch * 8);
+    // gHue = abs((int)pitch * 8);
   }
 
   EVERY_N_SECONDS( 3 ) {
@@ -134,6 +139,9 @@ void loop()
     Serial.print(pitch);
     Serial.print(" ");
     Serial.println(roll);
+
+    Serial.print("mz = ");
+    Serial.println(mz);
   }
 
   // do some periodic updates
@@ -182,10 +190,72 @@ void angleRainbow() {
 }
 
 /* mz - from 15 to -25 */
-float povFromAngle = 40;
-float povToAngle = 0;
+float povFromAngle = 15;
+float povToAngle = -30;
 
-void pov() {
+bool waitingForForwardSwipe = true;
+bool povRainbowMode = false;
+
+void pov3Internal() {
+  if (waitingForForwardSwipe) {
+    if (lastAngle > povFromAngle && angle <= povFromAngle) {
+      Serial.println("GO FWD!");
+      waitingForForwardSwipe = false;
+      sweepThroughSlices(true);
+      // we stalled the hue updating so push it forwards
+      gHue+=20;
+    }
+  } else {
+    if (lastAngle < povToAngle && angle >= povToAngle) {
+      Serial.println("GO BACK!");
+      waitingForForwardSwipe = true;
+      sweepThroughSlices(false);
+      // we stalled the hue updating so push it forwards
+    }
+  }
+}
+
+void pov3() {
+  povRainbowMode = false;
+  // pov2 was too jittery due to relying on absolute interpolated sensor data, skipping slices of the image etc
+  // v3:
+  // wait for cane to pass through trigger angle, measure velocity at that point and don't relinquish to main loop until we've drawn the perfect arc
+  pov3Internal();
+}
+
+void pov3Rainbow() {
+  povRainbowMode = true;
+  pov3Internal();
+}
+
+void sweepThroughSlices(bool forward) {
+  float totalSweep = povFromAngle - povToAngle;
+  float totalSweepTime = totalSweep / abs(lastAngleChange) * lastAngleDuration;
+  float microsPerSlice = totalSweepTime / bmpWidth;
+  if (totalSweepTime > 1000000) {
+    totalSweepTime = 1000000;
+  }
+  float delayTimePerSlice = abs(microsPerSlice - 150);
+  Serial.print("delayTimePerSlice = ");
+  Serial.println(delayTimePerSlice);
+  if (forward) {
+    for (int slice = 0; slice < bmpWidth; slice++) {
+      showPovSlice(slice);
+      FastLED.show();
+      delayMicroseconds(delayTimePerSlice);
+    }
+  } else {
+    for (int slice = bmpWidth; slice > 0; slice--) {
+      showPovSlice(slice);
+      FastLED.show();
+      delayMicroseconds(delayTimePerSlice);
+    }
+  }
+}
+/*float povFromAngle = 40;
+  float povToAngle = 0;
+*/
+void pov2Old() {
   float angle = mz + 25;
 
   if (angle > povFromAngle || angle < povToAngle) {
@@ -196,14 +266,6 @@ void pov() {
     float timeSinceLastAngle = micros() - lastAngleTime;
     float ratioToNextAngleReading = timeSinceLastAngle / lastAngleDuration;
     float interpolatedAngle = angle + (ratioToNextAngleReading * lastAngleChange);
-    /*
-        Serial.print("angle, inter, ratio = ");
-        Serial.print(angle);
-        Serial.print(", ");
-        Serial.print(interpolatedAngle);
-        Serial.print(", ");
-        Serial.println(ratioToNextAngleReading);
-    */
     int sliceNumber = (totalSweep - interpolatedAngle) / totalSweep * bmpWidth;
     if (sliceNumber < 0 || sliceNumber >= bmpWidth) {
       // we're past the image, stop
@@ -225,7 +287,7 @@ void fill(CRGB color) {
   }
 }
 
-void povBeatDeprecated() {
+void povV1Old() {
   unsigned long timeSinceLastBeat = (micros() - lastBeatTime) % lastBeatDuration;
   float halfBeat = lastBeatDuration / 2;
 
@@ -242,16 +304,25 @@ void povBeatDeprecated() {
     /*for (int led = 0; led < NUM_LEDS; led++) {
       leds[led] = CRGB::Red;
       }*/
-    showPovSlice((ratioComplete * bmpWidth));
+    showPovSlice(ratioComplete * bmpWidth);
   }
 }
 
 // draw a vertical slice of the POV bitmap
 void showPovSlice(int slice) {
-  Serial.print("slice = ");
-  Serial.println(slice);
   for (int led = 0; led < NUM_LEDS; led++) {
-    leds[led] = getPix(led, slice);
+    if (povRainbowMode) {
+      // basic mask - if it's not black, draw a moving rainbow
+      if (!isPixBlack(led, slice) ) {
+        leds[led] = CHSV((slice + gHue) % 255, 255, 255);
+      }
+      else {
+        leds[led] = CRGB::Black;
+      }
+
+    } else {
+      leds[led] = getPix(led, slice);
+    }
   }
 }
 
@@ -318,8 +389,14 @@ void loadBmp(const char *filename) {
 
   } else {
     Serial.println("failed to open file ");
-
   }
+}
+
+bool isPixBlack(int X, int Y) {
+  uint16_t row = X % bmpHeight;
+  uint16_t col = Y % bmpWidth;
+  int offset = ((bmpPixelDataOffset + (row * row_bytes)) + (col * 3));
+  return bmpData[offset] == 0 && bmpData[offset + 1] == 0 && bmpData[offset + 2] == 0;
 }
 
 CRGB getPix(int X, int Y) {
@@ -332,13 +409,6 @@ CRGB getPix(int X, int Y) {
   px.red = bmpData[offset + 2];
   return px;
 }
-
-
-
-
-
-
-
 
 
 
