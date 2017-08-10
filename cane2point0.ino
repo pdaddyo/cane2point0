@@ -4,9 +4,14 @@ FASTLED_USING_NAMESPACE
 #include <Wire.h>
 #include <EEPROM.h>
 #include "SerialFlash.h"
+#include <U8g2lib.h>
 
 NXPMotionSense imu;
 NXPSensorFusion filter;
+
+// text drawing with u8g2 library, set up a fake OLED screen so we can read framebuffer
+U8G2_ST7920_128X64_F_SW_SPI u8g2(U8G2_R0, 25, 26, 27, 16);
+String povTextString = "Hi Boomtown!";
 
 #define DATA_PIN    11
 #define CLK_PIN   13
@@ -15,7 +20,7 @@ NXPSensorFusion filter;
 #define NUM_LEDS    72
 CRGB leds[NUM_LEDS];
 
-#define BRIGHTNESS          15
+int BRIGHTNESS = 15;
 #define FRAMES_PER_SECOND  500
 
 // List of patterns to cycle through.  Each is defined as a separate function below.
@@ -41,12 +46,22 @@ int bmpWidth = 0;
 int bmpHeight = 0;
 int bmpPixelDataOffset = 0;
 
+// multiple images
+char fileNames[32][32];
+int fileIndex = 0;
+int numFiles = 0;
+int eepromAddress = 0;
+
 // interpolating the raw angle data
 float angle = 0;
 float lastAngle = 0;
 float lastAngleChange = 0;
 unsigned long lastAngleTime = 0;
 unsigned long lastAngleDuration = 50;
+
+// buttons
+bool button1Down = false;
+bool button2Down = false;
 
 void setup() {
   // usb debug
@@ -55,21 +70,48 @@ void setup() {
   delay(500); // startup pause
   Serial.println("setup()");
 
+  // init u8g2 for text
+  u8g2.begin();
+  u8g2.setFlipMode(0);
+  u8g2.setAutoPageClear(0);
+  u8g2.setFont(u8g2_font_helvB14_tf);
+
+  // enable prop shield LED support
+  pinMode(7, OUTPUT);
+
   // bluetooth
   Serial2.begin(9600);
 
   // enable memory module
   SerialFlash.begin(6);
+
+  // load all filenames
+  loadFileNames();
+
+  // load which index we're meant to be loading from the eeprom
+  byte value;
+  value = EEPROM.read(eepromAddress);
+
+  fileIndex = value % numFiles;
+  Serial.print("loading the file at index ");
+  Serial.println(fileIndex);
+  Serial.println(fileNames[fileIndex]);
+
   //attempt to load bmp from prop shield flash
-  loadBmp("boomtown.bmp");
+  loadBmp(fileNames[fileIndex]);
 
   // motion sensor
   imu.begin();
   filter.begin(100);
 
-  // enable prop shield LED support
-  pinMode(7, OUTPUT);
+  // ENABLE led controller
   digitalWrite(7, HIGH);
+
+  // button 1
+  pinMode(22, INPUT_PULLDOWN);
+
+  // button 2
+  pinMode(20, INPUT_PULLDOWN);
 
   // tell FastLED about the LED strip configuration
   FastLED.addLeds<LED_TYPE, DATA_PIN, CLK_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection(TypicalLEDStrip);
@@ -80,7 +122,7 @@ void setup() {
 
 
 typedef void (*SimplePatternList[])();
-SimplePatternList gPatterns = { pov3Rainbow, pov3, beatFlash, angleRainbow, bpmPulsing, rainbow, rainbowWithGlitter, confetti, sinelon, juggle };
+SimplePatternList gPatterns = { pov3, Fire2012, povText, pov3Rainbow, Fire2012Reverse, beatFlash, angleRainbow, bpmPulsing, rainbow, rainbowWithGlitter, confetti, sinelon, juggle };
 
 void loop()
 {
@@ -91,10 +133,35 @@ void loop()
   // send the 'leds' array out to the actual LED strip
   FastLED.show();
   // insert a delay to keep the framerate modest
-
-  // forget it we have enough to do each frame lol
   FastLED.delay(1000 / FRAMES_PER_SECOND);
 
+  // Serial.println(mz);
+
+  bool button1 = digitalRead(22);
+
+  if (!button1Down) {
+    if (button1) {
+      nextPattern();
+      button1Down = true;
+    }
+  } else {
+    if (!button1) {
+      button1Down = false;
+    }
+  }
+
+  bool button2 = digitalRead(20);
+
+  if (!button2Down) {
+    if (button2) {
+      prevPattern();
+      button2Down = true;
+    }
+  } else {
+    if (!button2) {
+      button2Down = false;
+    }
+  }
 
   if (imu.available()) {
     lastAngle = mz;
@@ -116,13 +183,13 @@ void loop()
     heading = filter.getYaw();
     pitchChange = pitch - lastPitch;
     if (lastPitchChange < 0 && pitchChange > 0  && abs(pitchChange) > 0.08) {
-
+      beat();
       //  Serial.print("up pitch = ");
       //  Serial.println(pitch);
     }
 
     if (lastPitchChange > 0 && pitchChange < 0 && abs(pitchChange) > 0.08) {
-      beat();
+
       // Serial.println("BEAT");
       // Serial.println(pitchChange);
     }
@@ -144,17 +211,12 @@ void loop()
     Serial.println(mz);
   }
 
+
+  checkBlueToothSerialState();
+
+
   // do some periodic updates
   EVERY_N_MILLISECONDS( 20 ) {
-    if (Serial2.available()) {
-      Serial.println("serial2 data!");
-      blueToothIncomingString = Serial2.readString();
-      // send a byte to the software serial port
-      Serial.println(blueToothIncomingString);
-      // if we hear anything nudge to next pattern - todo: proper control
-      nextPattern();
-    }
-
     gHue++;  // slowly cycle the "base color" through the rainbow
   }
 
@@ -162,6 +224,64 @@ void loop()
     // nextPattern();  // change patterns periodically
   }
 }
+
+void checkBlueToothSerialState() {
+  if (Serial2.available()) {
+    Serial.println("serial2 data:");
+    blueToothIncomingString = Serial2.readString();
+
+    if (blueToothIncomingString == "!B516!B507") {
+      Serial.println("Up pushed!");
+      // increase brightness
+      BRIGHTNESS += 5;
+      if (BRIGHTNESS > 128) {
+        BRIGHTNESS = 128;
+      }
+      FastLED.setBrightness(BRIGHTNESS);
+      return;
+    }
+    if (blueToothIncomingString == "!B615!B606") {
+      Serial.println("Down pushed!");
+      // reduce brightness
+      BRIGHTNESS -= 5;
+      if (BRIGHTNESS <= 0) {
+        BRIGHTNESS = 1;
+      }
+      FastLED.setBrightness(BRIGHTNESS);
+      return;
+    }
+
+    if (blueToothIncomingString == "!B813!B804") {
+      // right arrow
+      nextPattern();
+      return;
+    }
+    if (blueToothIncomingString == "!B714!B705") {
+      // left arrow
+      prevPattern();
+      return;
+    }
+
+    if (blueToothIncomingString == "!B11:!B10;") {
+      // button 1 == next image
+      fileIndex++;
+      if (fileIndex >= numFiles) {
+        fileIndex = 0;
+      }
+
+      EEPROM.write(eepromAddress, (byte)fileIndex);
+      return;
+    }
+
+    // if we get here it's a random string, set text to it
+    povTextString = blueToothIncomingString;
+    // enter text mode
+    gCurrentPatternNumber = 2;
+    Serial.println(blueToothIncomingString);
+  }
+}
+
+
 
 unsigned long lastBeatTime = 0;
 unsigned long lastBeatDuration = 500000;
@@ -189,43 +309,86 @@ void angleRainbow() {
   fill(CHSV( abs(mz * 4), 255, 255));
 }
 
-/* mz - from 15 to -25 */
-float povFromAngle = 15;
-float povToAngle = -30;
+/* mz - from -15 to 20 */
+float povFromAngle = -15;
+float povToAngle = 20;
 
 bool waitingForForwardSwipe = true;
 bool povRainbowMode = false;
+bool povTextMode = true;
 
-void pov3Internal() {
+void pov3Internal(bool swipeBack) {
   if (waitingForForwardSwipe) {
-    if (lastAngle > povFromAngle && angle <= povFromAngle) {
+    if (lastAngle < povFromAngle && angle >= povFromAngle) {
       Serial.println("GO FWD!");
       waitingForForwardSwipe = false;
       sweepThroughSlices(true);
       // we stalled the hue updating so push it forwards
-      gHue+=20;
+      gHue += 20;
     }
   } else {
     if (lastAngle < povToAngle && angle >= povToAngle) {
       Serial.println("GO BACK!");
       waitingForForwardSwipe = true;
-      sweepThroughSlices(false);
-      // we stalled the hue updating so push it forwards
+      if (swipeBack) {
+        sweepThroughSlices(false);
+      }
     }
   }
 }
 
 void pov3() {
   povRainbowMode = false;
+  povTextMode = false;
   // pov2 was too jittery due to relying on absolute interpolated sensor data, skipping slices of the image etc
   // v3:
   // wait for cane to pass through trigger angle, measure velocity at that point and don't relinquish to main loop until we've drawn the perfect arc
-  pov3Internal();
+  pov3Internal(false);
+}
+
+#define BIT(x,n) (((x) >> (n)) & 1)
+
+void povText() {
+  povTextMode = true;
+  pov3Internal(false);
+}
+
+void beginPovText() {
+  // draw it to buffer
+  u8g2.clearBuffer();
+  u8g2.drawStr(0, 20, povTextString.c_str());
+}
+
+void showPovTextSlice(int slice) {
+
+  uint8_t *ptr;
+  ptr = u8g2.getBufferPtr();
+  uint8_t h = u8g2.getBufferTileHeight();
+  uint8_t w = u8g2.getBufferTileWidth();
+
+  int pixelX = 0;
+  for (int y = 0; y < h * 8; y++) {
+    pixelX = 0;
+    for (int x = 0; x < w; x ++) {
+
+      for (int b = 7; b >= 0; b--) {
+        pixelX++;
+        if (pixelX == slice) {
+          if (BIT(((uint8_t) * (ptr + x + (w * y))), b) ) {
+            leds[NUM_LEDS - y] = CHSV((gHue) % 255, 255, 255);
+          } else {
+            leds[NUM_LEDS - y] = CRGB::Black;
+          }
+        }
+      }
+    }
+  }
 }
 
 void pov3Rainbow() {
   povRainbowMode = true;
-  pov3Internal();
+  povTextMode = false;
+  pov3Internal(false);
 }
 
 void sweepThroughSlices(bool forward) {
@@ -235,18 +398,30 @@ void sweepThroughSlices(bool forward) {
   if (totalSweepTime > 1000000) {
     totalSweepTime = 1000000;
   }
-  float delayTimePerSlice = abs(microsPerSlice - 150);
+  float delayTimePerSlice = abs(microsPerSlice);
   Serial.print("delayTimePerSlice = ");
   Serial.println(delayTimePerSlice);
+  if (povTextMode) {
+    beginPovText();
+  }
+
   if (forward) {
     for (int slice = 0; slice < bmpWidth; slice++) {
-      showPovSlice(slice);
+      if (povTextMode) {
+        showPovTextSlice(slice);
+      } else {
+        showPovSlice(slice);
+      }
       FastLED.show();
       delayMicroseconds(delayTimePerSlice);
     }
   } else {
     for (int slice = bmpWidth; slice > 0; slice--) {
-      showPovSlice(slice);
+      if (povTextMode) {
+        showPovTextSlice(slice);
+      } else {
+        showPovSlice(slice);
+      }
       FastLED.show();
       delayMicroseconds(delayTimePerSlice);
     }
@@ -340,7 +515,23 @@ short readShort(int offset) {
   return s;
 }
 
-void loadBmp(const char *filename) {
+void loadFileNames() {
+  // load all filenames from the serialFlash
+  //fileNames
+  SerialFlash.opendir();
+  fileIndex = 0;
+  uint32_t filesize;
+  while (SerialFlash.readdir(fileNames[numFiles], 32, filesize)) {
+    Serial.print("found file: ");
+    Serial.println(fileNames[numFiles]);
+    numFiles++;
+  }
+
+  Serial.print("found files: ");
+  Serial.println(numFiles);
+}
+
+void loadBmp(char *filename) {
   SerialFlashFile file;
   Serial.println("Waiting for serialFlash");
 
@@ -348,7 +539,9 @@ void loadBmp(const char *filename) {
     delay(10);
   }
 
-  Serial.println("serialFlash ready..");
+  Serial.print("serialFlash ready to load file ");
+  Serial.println(filename);
+
   file = SerialFlash.open(filename);
   if (file) {
     Serial.print("opened file ");
@@ -358,6 +551,9 @@ void loadBmp(const char *filename) {
     Serial.println(fileSize);
 
     // 24 bit bmps only please!
+    if (bmpData) {
+      free(bmpData);
+    }
 
     bmpData = (char*) malloc(fileSize);
     if (!bmpData) {
@@ -417,8 +613,16 @@ CRGB getPix(int X, int Y) {
 
 void nextPattern()
 {
+  fadeToBlackBy( leds, NUM_LEDS, 20);
   // add one to the current pattern number, and wrap around at the end
   gCurrentPatternNumber = (gCurrentPatternNumber + 1) % ARRAY_SIZE( gPatterns);
+}
+
+void prevPattern()
+{
+  fadeToBlackBy( leds, NUM_LEDS, 20);
+  // add one to the current pattern number, and wrap around at the end
+  gCurrentPatternNumber = abs((gCurrentPatternNumber - 1) % ARRAY_SIZE( gPatterns));
 }
 
 void rainbow()
@@ -477,4 +681,117 @@ void juggle() {
     dothue += 32;
   }
 }
+
+// Fire2012 by Mark Kriegsman, July 2012
+// as part of "Five Elements" shown here: http://youtu.be/knWiGsmgycY
+////
+// This basic one-dimensional 'fire' simulation works roughly as follows:
+// There's a underlying array of 'heat' cells, that model the temperature
+// at each point along the line.  Every cycle through the simulation,
+// four steps are performed:
+//  1) All cells cool down a little bit, losing heat to the air
+//  2) The heat from each cell drifts 'up' and diffuses a little
+//  3) Sometimes randomly new 'sparks' of heat are added at the bottom
+//  4) The heat from each cell is rendered as a color into the leds array
+//     The heat-to-color mapping uses a black-body radiation approximation.
+//
+// Temperature is in arbitrary units from 0 (cold black) to 255 (white hot).
+//
+// This simulation scales it self a bit depending on NUM_LEDS; it should look
+// "OK" on anywhere from 20 to 100 LEDs without too much tweaking.
+//
+// I recommend running this simulation at anywhere from 30-100 frames per second,
+// meaning an interframe delay of about 10-35 milliseconds.
+//
+// Looks best on a high-density LED setup (60+ pixels/meter).
+//
+//
+// There are two main parameters you can play with to control the look and
+// feel of your fire: COOLING (used in step 1 above), and SPARKING (used
+// in step 3 above).
+//
+// COOLING: How much does the air cool as it rises?
+// Less cooling = taller flames.  More cooling = shorter flames.
+// Default 50, suggested range 20-100
+#define COOLING  55
+
+// SPARKING: What chance (out of 255) is there that a new spark will be lit?
+// Higher chance = more roaring fire.  Lower chance = more flickery fire.
+// Default 120, suggested range 50-200.
+#define SPARKING 70
+
+bool gReverseDirection = false;
+
+void Fire2012()
+{
+  // Array of temperature readings at each simulation cell
+  static byte heat[NUM_LEDS];
+
+  // Step 1.  Cool down every cell a little
+  for ( int i = 0; i < NUM_LEDS; i++) {
+    heat[i] = qsub8( heat[i],  random8(0, ((COOLING * 10) / NUM_LEDS) + 2));
+  }
+
+  // Step 2.  Heat from each cell drifts 'up' and diffuses a little
+  for ( int k = NUM_LEDS - 1; k >= 2; k--) {
+    heat[k] = (heat[k - 1] + heat[k - 2] + heat[k - 2] ) / 3;
+  }
+
+  // Step 3.  Randomly ignite new 'sparks' of heat near the bottom
+  if ( random8() < SPARKING ) {
+    int y = random8(7);
+    heat[y] = qadd8( heat[y], random8(160, 255) );
+  }
+
+  // Step 4.  Map from heat cells to LED colors
+  for ( int j = 0; j < NUM_LEDS; j++) {
+    CRGB color = HeatColor( heat[j]);
+    int pixelnumber;
+    if ( false ) {
+      pixelnumber = (NUM_LEDS - 1) - j;
+    } else {
+      pixelnumber = j;
+    }
+    leds[pixelnumber] = color;
+  }
+
+  delay(4);
+}
+
+void Fire2012Reverse()
+{
+  // Array of temperature readings at each simulation cell
+  static byte heat[NUM_LEDS];
+
+  // Step 1.  Cool down every cell a little
+  for ( int i = 0; i < NUM_LEDS; i++) {
+    heat[i] = qsub8( heat[i],  random8(0, ((COOLING * 10) / NUM_LEDS) + 2));
+  }
+
+  // Step 2.  Heat from each cell drifts 'up' and diffuses a little
+  for ( int k = NUM_LEDS - 1; k >= 2; k--) {
+    heat[k] = (heat[k - 1] + heat[k - 2] + heat[k - 2] ) / 3;
+  }
+
+  // Step 3.  Randomly ignite new 'sparks' of heat near the bottom
+  if ( random8() < SPARKING ) {
+    int y = random8(7);
+    heat[y] = qadd8( heat[y], random8(160, 255) );
+  }
+
+  // Step 4.  Map from heat cells to LED colors
+  for ( int j = 0; j < NUM_LEDS; j++) {
+    CRGB color = HeatColor( heat[j]);
+    int pixelnumber;
+    if ( true ) {
+      pixelnumber = (NUM_LEDS - 1) - j;
+    } else {
+      pixelnumber = j;
+    }
+    leds[pixelnumber] = color;
+  }
+
+  delay(4);
+}
+
 
